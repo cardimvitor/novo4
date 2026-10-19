@@ -1,0 +1,129 @@
+name: Agents (Codex, DeepSeek)
+
+# Claude Code continua em claude-code.yml (@claude). Este arquivo cobre @codex e @deepseek.
+# Antes de rodar, o agente lê o quadro em .agents/tasks e recebe as regras de AGENTS.md.
+# Ao terminar, abre um PR em rascunho com a explicação para os outros agentes.
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  codex:
+    if: |
+      (github.event_name == 'issues' && contains(github.event.issue.body, '@codex') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '{mention}') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    environment: agents
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      TASK: ${{ github.event.comment.body || github.event.issue.body }}
+      ISSUE: ${{ github.event.issue.number }}
+      GH_TOKEN: ${{ github.token }}
+      AGENT: codex
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install Codex CLI
+        run: npm install -g @openai/codex@0.163.0
+      - name: Check board
+        run: bash .github/scripts/agent-board.sh check "$ISSUE"
+      - name: Register start on board
+        run: bash .github/scripts/agent-board.sh start "$AGENT" "$ISSUE"
+      - name: Build prompt
+        run: |
+          bash .github/scripts/agent-board.sh show > "$RUNNER_TEMP/board.md"
+          {
+            echo "Você é o agente $AGENT executando a Issue #$ISSUE. Siga AGENTS.md."
+            echo
+            echo "Quadro atual (não repita o que já está em andamento):"
+            cat "$RUNNER_TEMP/board.md"
+            echo
+            echo "Pedido da Issue:"
+            printf '%s\n' "$TASK"
+            echo
+            echo "Ao terminar, escreva .agents/handoffs/issue-$ISSUE.md com a explicação para os outros agentes."
+          } > "$RUNNER_TEMP/prompt.md"
+      - name: Run Codex
+        env:
+          # Opção 1 (assinatura ChatGPT, NÃO oficial em CI): conteúdo de ~/.codex/auth.json de uma máquina já logada.
+          # Opção 2 (oficial, cobrada à parte): OPENAI_API_KEY.
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -n "$CODEX_AUTH_JSON" ]; then
+            umask 077
+            mkdir -p "$HOME/.codex"
+            printf '%s' "$CODEX_AUTH_JSON" > "$HOME/.codex/auth.json"
+            echo "Codex: usando o login salvo em CODEX_AUTH_JSON."
+          elif [ -n "$OPENAI_API_KEY" ]; then
+            printenv OPENAI_API_KEY | codex login --with-api-key
+            echo "Codex: usando OPENAI_API_KEY."
+          else
+            echo "Configure o secret CODEX_AUTH_JSON ou OPENAI_API_KEY." >&2
+            exit 1
+          fi
+          codex login status
+          codex exec -s workspace-write -o "$RUNNER_TEMP/codex-last.md" "$(cat "$RUNNER_TEMP/prompt.md")"
+      - name: Open draft pull request
+        run: bash .github/scripts/open-agent-pr.sh codex "$RUNNER_TEMP/codex-last.md"
+
+  deepseek:
+    if: |
+      (github.event_name == 'issues' && contains(github.event.issue.body, '@deepseek') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association)) ||
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '{mention}') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    environment: agents
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    env:
+      TASK: ${{ github.event.comment.body || github.event.issue.body }}
+      ISSUE: ${{ github.event.issue.number }}
+      GH_TOKEN: ${{ github.token }}
+      AGENT: deepseek
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install aider
+        run: pip install aider-chat==0.86.2
+      - name: Check board
+        run: bash .github/scripts/agent-board.sh check "$ISSUE"
+      - name: Register start on board
+        run: bash .github/scripts/agent-board.sh start "$AGENT" "$ISSUE"
+      - name: Build prompt
+        run: |
+          bash .github/scripts/agent-board.sh show > "$RUNNER_TEMP/board.md"
+          {
+            echo "Você é o agente $AGENT executando a Issue #$ISSUE. Siga AGENTS.md."
+            echo
+            echo "Quadro atual (não repita o que já está em andamento):"
+            cat "$RUNNER_TEMP/board.md"
+            echo
+            echo "Pedido da Issue:"
+            printf '%s\n' "$TASK"
+            echo
+            echo "Ao terminar, escreva .agents/handoffs/issue-$ISSUE.md com a explicação para os outros agentes."
+          } > "$RUNNER_TEMP/prompt.md"
+      - name: Run DeepSeek through aider
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        run: |
+          test -n "$DEEPSEEK_API_KEY"
+          aider --model deepseek/deepseek-v4-pro --read AGENTS.md --yes-always --no-show-model-warnings --message-file "$RUNNER_TEMP/prompt.md"
+      - name: Open draft pull request
+        run: bash .github/scripts/open-agent-pr.sh deepseek
